@@ -1,0 +1,245 @@
+### Setup variables to verify thumbprint of certificate and if its installed
+$CertThumb='ENTERYOURCERTTHUMBPRINT'
+$LocalThumb = (Get-ChildItem cert:\LocalMachine\My\ | Where-Object {$_.Subject -eq "CN=ImpactKeyVault" }).Thumbprint
+$PFXurl = 'Where to download PFX from'
+$InstallerDir = "c:\temp"
+$PFXfile = "c:\temp\cert.pfx"
+$PFXpass = "EnterYourPFXPassword"
+$VaultName = "EnterYourKeyVaultName"
+$TenantId = "ENTERTENANTID"
+$ApplicationId = "EnterAppID"
+$Thumbprint = (Get-ChildItem cert:\LocalMachine\My\ | Where-Object {$_.Subject -eq "CN=ImpactKeyVault" }).Thumbprint
+
+### Ensure TLS 1.2 is forced and must happen before connections of any kind ###
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+### Ensure Azure Module is Installed ###
+if (Get-Module -ListAvailable -Name Az.KeyVault) {
+   write-host "Azure Module Installed"
+    } else {
+        Install-Module -Name Az -AllowClobber -Scope AllUsers
+    }
+    
+### If not installed then download and install it and check again if installed
+if ($LocalThumb -ne $CertThumb) {
+# Check if the folder already exists if not make it
+if (-not (Test-Path -Path $InstallerDir)) {
+    # The folder does not exist, so create it
+    New-Item -Path $InstallerDir -ItemType Directory
+    Write-Host "Folder created: $InstallerDir"
+} else {
+    Write-Host "Folder already exists: $InstallerDir"
+}
+Write-Host "Downloading cert pfx from $PFXUrl"
+$wc = New-Object System.Net.WebClient
+$wc.DownloadFile($PFXUrl, $PFXfile)
+Import-PfxCertificate –FilePath $PFXfile cert:\localMachine\My -Password (ConvertTo-SecureString -String $PFXpass -Force –AsPlainText)
+write-host "The certificate should now be installed do you can do things, but we will delete it when done..."
+}else {
+### Looks likes it is installed, lets update Ninja custom fields
+write-host "The certificate was already installed, going to do the thigns then delete it..."
+}
+
+# Check for required PowerShell version (7+)
+if (!($PSVersionTable.PSVersion.Major -ge 7)) {
+  try {
+    
+    # Install PowerShell 7 if missing
+    if (!(Test-Path "$env:SystemDrive\Program Files\PowerShell\7")) {
+      Write-Output 'Installing PowerShell version 7...'
+      Invoke-Expression "& { $(Invoke-RestMethod https://aka.ms/install-powershell.ps1) } -UseMSI -Quiet"
+    }
+
+    # Refresh PATH
+    $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    
+    # Restart script in PowerShell 7
+    pwsh -File "`"$PSCommandPath`"" @PSBoundParameters
+    
+  }
+  catch {
+    Write-Output 'PowerShell 7 was not installed. Update PowerShell and try again.'
+    throw $Error
+  }
+  finally { exit $LASTEXITCODE }
+}
+
+### Ensure Azure Module is Installed ###
+if (Get-Module -ListAvailable -Name Az.KeyVault) {
+   write-host "Azure Module Installed"
+    } else {
+        Install-Module -Name Az -AllowClobber -Scope AllUsers
+    }
+
+#Connect to Azure with provided Tenant ID, Application ID, and Pre-Installed Certificate
+Connect-AzAccount -ServicePrincipal -CertificateThumbprint $Thumbprint -ApplicationId $ApplicationId -TenantId $TenantId
+
+# Get a Hudu API Key
+$HuduAPIKey = Get-AzKeyVaultSecret -vaultName $VaultName -name $VaultName -AsPlainText
+# Set the base domain of your Hudu instance without a trailing /
+$HuduBaseDomain = Get-AzKeyVaultSecret -vaultName $VaultName -name "HuduBaseDomain" -AsPlainText
+
+# Discconect from Azure Key Vault #
+Disconnect-AzAccount
+
+#Company Name as it appears in Hudu
+$CompanyName = $env:NINJA_ORGANIZATION_NAME
+$HuduAssetLayoutName = "IIS Server - AutoDoc"
+#####################################################################
+
+if (Get-Module -ListAvailable -Name HuduAPI) {
+		Import-Module HuduAPI 
+	} else {
+		Install-Module HuduAPI -Force
+		Import-Module HuduAPI
+	}
+  
+if (Get-Module -ListAvailable -Name Webadministration) {
+		Import-Module Webadministration
+	} else {
+		Install-Module Webadministration -Force
+		Import-Module Webadministration
+	}
+
+	if (Get-Module -ListAvailable -Name IISAdministration) {
+		Import-Module IISAdministration
+	} else {
+		Install-Module IISAdministration -Force
+		Import-Module IISAdministration
+	}
+  
+
+#Set Hudu logon information
+New-HuduAPIKey $HuduAPIKey
+New-HuduBaseUrl $HuduBaseDomain
+
+$Company = Get-HuduCompanies -name $CompanyName 
+if ($company) {	
+
+	$Layout = Get-HuduAssetLayouts -name $HuduAssetLayoutName
+		
+	if (!$Layout) { 
+		$AssetLayoutFields = @(
+			@{
+				label = 'Instance Name'
+				field_type = 'Text'
+				show_in_list = 'true'
+				position = 1
+			},
+			@{
+				label = 'Instance Host'
+				field_type = 'RichText'
+				show_in_list = 'true'
+				position = 2
+			},
+			@{
+				label = 'Websites'
+				field_type = 'RichText'
+				show_in_list = 'false'
+				position = 3
+			},
+			@{
+				label = 'App Pools'
+				field_type = 'RichText'
+				show_in_list = 'false'
+				position = 4
+			}
+		)
+		
+		Write-Host "Creating New Asset Layout $HuduAssetLayoutName"
+		$NewLayout = New-HuduAssetLayout -name $HuduAssetLayoutName -icon "fas fa-network-wired" -color "#4CAF50" -icon_color "#ffffff" -include_passwords $false -include_photos $false -include_comments $false -include_files $false -fields $AssetLayoutFields
+		$Layout = Get-HuduAssetLayouts -name $HuduAssetLayoutName
+	}
+	
+	
+	$ComputerName = $($Env:COMPUTERNAME)
+	
+	#Find the parent asset from serial
+	$ParentAsset = Get-HuduAssets -primary_serial (get-ciminstance win32_bios).serialnumber
+	
+	#If count exists we either got 0 or more than 1 either way lets try to match off name
+	if ($ParentAsset.count){
+		$ParentAsset = Get-HuduAssets -companyid $company.id -name $ComputerName
+	}
+	
+	
+	if ($ParentAsset) {
+		$LinkedDevice = "<a href=$($ParentAsset.url) >$ComputerName</a>"
+	} else {
+		$LinkedDevice = $ComputerName
+	}
+	
+	Import-Module Webadministration
+	$Instances = Get-Website
+	$Websites = @()
+	$AppPools = @()
+	
+	foreach ($Instance in $Instances) {
+		$AppPool = Get-IISAppPool -Name $Instance.ApplicationPool
+		$AppPoolobj = New-Object -TypeName PSObject
+		$AppPoolobj | Add-Member -MemberType NoteProperty -Name "Name" -value $AppPool.Name
+		$AppPoolobj | Add-Member -MemberType NoteProperty -Name "Website Name" -value $Instance.Name
+		$AppPoolobj | Add-Member -MemberType NoteProperty -Name "State" -value $AppPool.state
+		$AppPoolobj | Add-Member -MemberType NoteProperty -Name  "ManagedRuntimeVersion" -value $AppPool.ManagedRuntimeVersion
+		$AppPoolobj | Add-Member -MemberType NoteProperty -Name  "ManagedPipelineMode" -value $AppPool.ManagedPipelineMode
+		$AppPoolobj | Add-Member -MemberType NoteProperty -Name  "StartMode" -value $AppPool.StartMode
+		$AppPools += $AppPoolobj
+		foreach ($binding in $Instance.bindings.collection) {
+			$Websiteobj = New-Object -TypeName PSObject
+			$Websiteobj | Add-Member -MemberType NoteProperty -Name "Name" -value $Instance.Name
+			$Websiteobj | Add-Member -MemberType NoteProperty -Name "AppPool Name" -value $AppPool.Name
+			$Websiteobj | Add-Member -MemberType NoteProperty -Name "State" -value $Instance.state
+			$Websiteobj | Add-Member -MemberType NoteProperty -Name  "PhysicalPath" -value $Instance.physicalPath
+			$Websiteobj | Add-Member -MemberType NoteProperty -Name  "Protocol" -value $binding.Protocol
+			$Websiteobj | Add-Member -MemberType NoteProperty -Name  "Bindings" -value $binding.BindingInformation
+			$Websites += $Websiteobj
+		}
+		$WebsitesHTML = $Websites | ConvertTo-Html -fragment | Out-String
+		$WebsitesHTML = $WebsitesHTML -replace "&lt;th>", "&lt;th style=`"background-color:#4CAF50`">"
+		$WebsitesHTML = $WebsitesHTML -replace "&lt;table>", "&lt;table class=`"table table-bordered table-hover`" style=`"width:80%`">"
+
+		$AppPoolsHTML = $AppPools | ConvertTo-Html -fragment | Out-String
+		$AppPoolsHTML = $AppPoolsHTML -replace "&lt;th>", "&lt;th style=`"background-color:#4CAF50`">"
+		$AppPoolsHTML = $AppPoolsHTML -replace "&lt;table>", "&lt;table class=`"table table-bordered table-hover`" style=`"width:80%`">"
+	
+		$AssetFields = @{
+					"server_name"     = "$($ENV:COMPUTERNAME)"
+					"websites"         = $WebsitesHTML
+					"app_pools"         = $AppPoolsHTML
+					"instance_host"    = $LinkedDevice
+					}
+									
+		$companyid = $company.id
+		$AssetName = "$($ENV:COMPUTERNAME)"
+		
+		#Check if there is already an asset	
+		$Asset = Get-HuduAssets -name $AssetName -companyid $companyid -assetlayoutid $Layout.id
+		
+		#If the Asset does not exist, we edit the body to be in the form of a new asset, if not, we just upload.
+		if (!$Asset) {
+			Write-Host "Creating new Asset"
+			$Asset = New-HuduAsset -name $AssetName -company_id $companyid -asset_layout_id $Layout.id -fields $AssetFields	
+		}
+		else {
+			Write-Host "Updating Asset"
+			$Asset = Set-HuduAsset -asset_id $Asset.id -name $AssetName -company_id $companyid -asset_layout_id $layout.id -fields $AssetFields	
+		}
+	}
+
+} else {
+	write-host "$CompanyName Not found in Hudu." -ForegroundColor Red
+}
+
+### Cleanup install folder
+# Check if the folder already exists if not make it
+if (-not (Test-Path -Path $InstallerDir)) {
+    # The folder does not exist, so create it
+    Write-Host "Folder already removed: $InstallerDir"
+} else {
+    Remove-Item –path $InstallerDir –recurse -Force
+    write-host "$InstallerDir and the contents Deleted.." -BackgroundColor Green -ForegroundColor Black
+}
+
+### Remove Keyvault Certificate file for security reasons
+(Get-ChildItem cert:\LocalMachine\My\ | Where-Object {$_.Thumbprint -eq $CertThumb }) | Remove-Item
+write-host "The certificate has now been deleted for security..."
